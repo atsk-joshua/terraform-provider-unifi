@@ -29,15 +29,20 @@ resource "unifi_network" "corp" {
   management = "GATEWAY"
 
   gateway = {
-    host_ip_address = "192.168.10.1"
-    prefix_length   = 24
+    host_ip_address         = "192.168.10.1"
+    prefix_length           = 24
+    isolation_enabled       = false
+    cellular_backup_enabled = false
+    internet_access_enabled = true
+    mdns_forwarding_enabled = false
 
     dhcp = {
-      range_start        = "192.168.10.100"
-      range_stop         = "192.168.10.200"
-      dns_servers        = ["10.10.20.13"]
-      domain_name        = "corp.lan"
-      lease_time_seconds = 86400
+      range_start                     = "192.168.10.100"
+      range_stop                      = "192.168.10.200"
+      dns_servers                     = ["10.10.20.13"]
+      domain_name                     = "corp.lan"
+      lease_time_seconds              = 86400
+      ping_conflict_detection_enabled = true
     }
   }
 }
@@ -72,7 +77,12 @@ Required:
 Optional:
 
 - `auto_scale_enabled` (Boolean) Auto-scale the subnet size based on active DHCP leases.
+- `cellular_backup_enabled` (Boolean) Whether this network may use cellular backup when WAN connections are down. The Integration API requires a value on every gateway-network write; omitted configurations default to false.
 - `dhcp` (Attributes) DHCP server for this subnet. Omit the block for no DHCP. (see [below for nested schema](#nestedatt--gateway--dhcp))
+- `internet_access_enabled` (Boolean) Whether devices on this network may access the internet. The Integration API requires a value on every gateway-network write; omitted configurations default to true.
+- `isolation_enabled` (Boolean) Whether this network is isolated from other networks. The Integration API requires a value on every gateway-network write; omitted configurations default to false.
+- `mdns_forwarding_enabled` (Boolean) Whether this network participates in mDNS forwarding. Omitted configurations default to false; a value is always sent for compatibility with Network versions where it is required.
+- `zone_id` (String) Firewall zone UUID associated with this network. When omitted for a new gateway network, the provider resolves the controller's system-defined Internal zone.
 
 <a id="nestedatt--gateway--dhcp"></a>
 ### Nested Schema for `gateway.dhcp`
@@ -86,4 +96,5 @@ Optional:
 
 - `dns_servers` (List of String) DNS servers handed to clients (max 4). Omit for the controller default.
 - `domain_name` (String) Domain name handed to clients.
-- `lease_time_seconds` (Number) DHCP lease time in seconds (0-31536000).
+- `lease_time_seconds` (Number) DHCP lease time in seconds (0-31536000). The Integration API requires a value for DHCP servers; omitted configurations default to 86400 (24 hours).
+- `ping_conflict_detection_enabled` (Boolean) Check whether an address is already in use before the DHCP server offers it. The Integration API requires a value; omitted configurations default to true.

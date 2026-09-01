@@ -1,0 +1,3 @@
+kind: Fixed
+body: '`unifi_network`: always send controller-required gateway behavior, DHCP server, and firewall zone values so gateway-managed networks create and update successfully on current UniFi Network versions.'
+time: 2026-08-31T21:15:00.000000000-07:00

@@ -29,9 +29,15 @@ import (
 // Management modes. The controller's discriminator is "GATEWAY" (not
 // "GATEWAY_MANAGED"); see FromGatewayManagedNetworkCreateUpdate in go-unifi.
 const (
-	mgmtUnmanaged  = "UNMANAGED"
-	mgmtGateway    = "GATEWAY"
-	dhcpModeServer = "SERVER"
+	mgmtUnmanaged          = "UNMANAGED"
+	mgmtGateway            = "GATEWAY"
+	dhcpModeServer         = "SERVER"
+	defaultIsolation       = false
+	defaultCellularBackup  = false
+	defaultInternetAccess  = true
+	defaultMDNSForwarding  = false
+	defaultConflictCheck   = true
+	defaultDHCPLeaseSecond = int64(86400)
 )
 
 var (
@@ -66,21 +72,27 @@ type networkModel struct {
 // GATEWAY. host_ip_address + prefix_length are the gateway's own address and
 // the subnet size (e.g. 192.168.1.1 / 24).
 type gatewayModel struct {
-	HostIPAddress    types.String `tfsdk:"host_ip_address"`
-	PrefixLength     types.Int64  `tfsdk:"prefix_length"`
-	AutoScaleEnabled types.Bool   `tfsdk:"auto_scale_enabled"`
-	DHCP             *dhcpModel   `tfsdk:"dhcp"`
+	HostIPAddress         types.String `tfsdk:"host_ip_address"`
+	PrefixLength          types.Int64  `tfsdk:"prefix_length"`
+	AutoScaleEnabled      types.Bool   `tfsdk:"auto_scale_enabled"`
+	IsolationEnabled      types.Bool   `tfsdk:"isolation_enabled"`
+	CellularBackupEnabled types.Bool   `tfsdk:"cellular_backup_enabled"`
+	InternetAccessEnabled types.Bool   `tfsdk:"internet_access_enabled"`
+	MDNSForwardingEnabled types.Bool   `tfsdk:"mdns_forwarding_enabled"`
+	ZoneID                types.String `tfsdk:"zone_id"`
+	DHCP                  *dhcpModel   `tfsdk:"dhcp"`
 }
 
 // dhcpModel is a DHCP server on the gateway-managed subnet. Present block =>
 // DHCP server on; omit the block for no DHCP. Mode is always SERVER (RELAY is a
 // separate union variant, deferred).
 type dhcpModel struct {
-	RangeStart       types.String `tfsdk:"range_start"`
-	RangeStop        types.String `tfsdk:"range_stop"`
-	DNSServers       types.List   `tfsdk:"dns_servers"`
-	DomainName       types.String `tfsdk:"domain_name"`
-	LeaseTimeSeconds types.Int64  `tfsdk:"lease_time_seconds"`
+	RangeStart                   types.String `tfsdk:"range_start"`
+	RangeStop                    types.String `tfsdk:"range_stop"`
+	DNSServers                   types.List   `tfsdk:"dns_servers"`
+	DomainName                   types.String `tfsdk:"domain_name"`
+	LeaseTimeSeconds             types.Int64  `tfsdk:"lease_time_seconds"`
+	PingConflictDetectionEnabled types.Bool   `tfsdk:"ping_conflict_detection_enabled"`
 }
 
 func (r *networkResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -140,6 +152,36 @@ func (r *networkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 						Default:     booldefault.StaticBool(false),
 						Description: "Auto-scale the subnet size based on active DHCP leases.",
 					},
+					"isolation_enabled": schema.BoolAttribute{
+						Optional: true,
+						Computed: true,
+						Description: "Whether this network is isolated from other networks. The Integration API requires " +
+							"a value on every gateway-network write; omitted configurations default to false.",
+					},
+					"cellular_backup_enabled": schema.BoolAttribute{
+						Optional: true,
+						Computed: true,
+						Description: "Whether this network may use cellular backup when WAN connections are down. The " +
+							"Integration API requires a value on every gateway-network write; omitted configurations default to false.",
+					},
+					"internet_access_enabled": schema.BoolAttribute{
+						Optional: true,
+						Computed: true,
+						Description: "Whether devices on this network may access the internet. The Integration API requires " +
+							"a value on every gateway-network write; omitted configurations default to true.",
+					},
+					"mdns_forwarding_enabled": schema.BoolAttribute{
+						Optional: true,
+						Computed: true,
+						Description: "Whether this network participates in mDNS forwarding. Omitted configurations default " +
+							"to false; a value is always sent for compatibility with Network versions where it is required.",
+					},
+					"zone_id": schema.StringAttribute{
+						Optional: true,
+						Computed: true,
+						Description: "Firewall zone UUID associated with this network. When omitted for a new gateway network, " +
+							"the provider resolves the controller's system-defined Internal zone.",
+					},
 					"dhcp": schema.SingleNestedAttribute{
 						Optional:    true,
 						Description: "DHCP server for this subnet. Omit the block for no DHCP.",
@@ -163,10 +205,17 @@ func (r *networkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 								Description: "Domain name handed to clients.",
 							},
 							"lease_time_seconds": schema.Int64Attribute{
-								Optional:    true,
-								Computed:    true,
-								Description: "DHCP lease time in seconds (0-31536000).",
-								Validators:  []validator.Int64{int64validator.Between(0, 31536000)},
+								Optional: true,
+								Computed: true,
+								Description: "DHCP lease time in seconds (0-31536000). The Integration API requires a value " +
+									"for DHCP servers; omitted configurations default to 86400 (24 hours).",
+								Validators: []validator.Int64{int64validator.Between(0, 31536000)},
+							},
+							"ping_conflict_detection_enabled": schema.BoolAttribute{
+								Optional: true,
+								Computed: true,
+								Description: "Check whether an address is already in use before the DHCP server offers it. The " +
+									"Integration API requires a value; omitted configurations default to true.",
 							},
 						},
 					},
@@ -219,6 +268,10 @@ func (r *networkResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 	var plan networkModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	r.resolveGatewayZoneID(ctx, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -283,6 +336,10 @@ func (r *networkResource) Update(ctx context.Context, req resource.UpdateRequest
 		resp.Diagnostics.AddError("Invalid network id", err.Error())
 		return
 	}
+	r.resolveGatewayZoneID(ctx, &plan, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	body, diags := expandNetwork(ctx, plan)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
@@ -328,6 +385,29 @@ func (r *networkResource) ImportState(ctx context.Context, req resource.ImportSt
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
+// resolveGatewayZoneID supplies the system-defined Internal zone on create
+// when configuration does not name a zone. Network 10.6 requires zoneId on a
+// gateway-network write even though its OpenAPI schema does not mark it
+// required. Existing/imported state and explicit configuration always win.
+func (r *networkResource) resolveGatewayZoneID(ctx context.Context, m *networkModel, diags *diag.Diagnostics) {
+	if m.Management.ValueString() != mgmtGateway || m.Gateway == nil ||
+		(!m.Gateway.ZoneID.IsNull() && !m.Gateway.ZoneID.IsUnknown()) {
+		return
+	}
+	for zone, err := range r.data.Client.Official().Firewall().ListZonesAll(ctx, r.data.SiteID, "") {
+		if err != nil {
+			diags.AddError("Failed to resolve gateway network zone", err.Error())
+			return
+		}
+		if zone.Name == "Internal" && zone.Metadata.Origin == "SYSTEM_DEFINED" {
+			m.Gateway.ZoneID = types.StringValue(zone.Id.String())
+			return
+		}
+	}
+	diags.AddAttributeError(path.Root("gateway").AtName("zone_id"), "Unable to resolve gateway network zone",
+		"The controller requires zone_id for gateway networks, but its system-defined Internal zone was not found. Set gateway.zone_id explicitly.")
+}
+
 // expandNetwork builds the create/update body.
 //
 // NetworkCreateOrUpdate.MarshalJSON writes the named fields (name, vlanId,
@@ -354,17 +434,20 @@ func expandNetwork(ctx context.Context, m networkModel) (official.NetworkCreateO
 		AutoScaleEnabled: m.Gateway.AutoScaleEnabled.ValueBool(),
 	}
 	if d := m.Gateway.DHCP; d != nil {
+		leaseTimeSeconds := defaultDHCPLeaseSecond
+		if !d.LeaseTimeSeconds.IsNull() && !d.LeaseTimeSeconds.IsUnknown() {
+			leaseTimeSeconds = d.LeaseTimeSeconds.ValueInt64()
+		}
+		pingConflictDetectionEnabled := boolValueOrDefault(d.PingConflictDetectionEnabled, defaultConflictCheck)
 		server := official.GatewayManagedIPv4DHCPServerConfiguration{
-			Mode:           dhcpModeServer,
-			IpAddressRange: &official.IPAddressRange{Start: d.RangeStart.ValueString(), Stop: d.RangeStop.ValueString()},
+			Mode:                         dhcpModeServer,
+			IpAddressRange:               &official.IPAddressRange{Start: d.RangeStart.ValueString(), Stop: d.RangeStop.ValueString()},
+			LeaseTimeSeconds:             int32Pointer(safeInt32(leaseTimeSeconds)),
+			PingConflictDetectionEnabled: &pingConflictDetectionEnabled,
 		}
 		if !d.DomainName.IsNull() && !d.DomainName.IsUnknown() {
 			v := d.DomainName.ValueString()
 			server.DomainName = &v
-		}
-		if !d.LeaseTimeSeconds.IsNull() && !d.LeaseTimeSeconds.IsUnknown() {
-			v := safeInt32(d.LeaseTimeSeconds.ValueInt64())
-			server.LeaseTimeSeconds = &v
 		}
 		if !d.DNSServers.IsNull() && !d.DNSServers.IsUnknown() {
 			var dns []string
@@ -382,11 +465,27 @@ func expandNetwork(ctx context.Context, m networkModel) (official.NetworkCreateO
 		ipv4.DhcpConfiguration = &dhcpCfg
 	}
 
+	isolationEnabled := boolValueOrDefault(m.Gateway.IsolationEnabled, defaultIsolation)
+	cellularBackupEnabled := boolValueOrDefault(m.Gateway.CellularBackupEnabled, defaultCellularBackup)
+	internetAccessEnabled := boolValueOrDefault(m.Gateway.InternetAccessEnabled, defaultInternetAccess)
+	mdnsForwardingEnabled := boolValueOrDefault(m.Gateway.MDNSForwardingEnabled, defaultMDNSForwarding)
 	gw := official.GatewayManagedNetworkCreateUpdate{
-		Name:              m.Name.ValueString(),
-		VlanId:            safeInt32(m.VlanID.ValueInt64()),
-		Enabled:           m.Enabled.ValueBool(),
-		Ipv4Configuration: ipv4,
+		Name:                  m.Name.ValueString(),
+		VlanId:                safeInt32(m.VlanID.ValueInt64()),
+		Enabled:               m.Enabled.ValueBool(),
+		IsolationEnabled:      &isolationEnabled,
+		CellularBackupEnabled: &cellularBackupEnabled,
+		InternetAccessEnabled: &internetAccessEnabled,
+		MdnsForwardingEnabled: &mdnsForwardingEnabled,
+		Ipv4Configuration:     ipv4,
+	}
+	if !m.Gateway.ZoneID.IsNull() && !m.Gateway.ZoneID.IsUnknown() {
+		zoneID, err := uuid.Parse(m.Gateway.ZoneID.ValueString())
+		if err != nil {
+			diags.AddAttributeError(path.Root("gateway").AtName("zone_id"), "Invalid gateway network zone_id", err.Error())
+			return body, diags
+		}
+		gw.ZoneId = &zoneID
 	}
 	if err := body.FromGatewayManagedNetworkCreateUpdate(gw); err != nil {
 		diags.AddError("Failed to build gateway network", err.Error())
@@ -420,24 +519,38 @@ func flattenNetwork(ctx context.Context, n *official.NetworkDetails) (networkMod
 	}
 	ip := gmd.Ipv4Configuration
 	gw := &gatewayModel{
-		HostIPAddress:    types.StringValue(ip.HostIpAddress),
-		PrefixLength:     types.Int64Value(int64(ip.PrefixLength)),
-		AutoScaleEnabled: types.BoolValue(ip.AutoScaleEnabled),
+		HostIPAddress:         types.StringValue(ip.HostIpAddress),
+		PrefixLength:          types.Int64Value(int64(ip.PrefixLength)),
+		AutoScaleEnabled:      types.BoolValue(ip.AutoScaleEnabled),
+		IsolationEnabled:      types.BoolValue(boolPointerOrDefault(gmd.IsolationEnabled, defaultIsolation)),
+		CellularBackupEnabled: types.BoolValue(boolPointerOrDefault(gmd.CellularBackupEnabled, defaultCellularBackup)),
+		InternetAccessEnabled: types.BoolValue(boolPointerOrDefault(gmd.InternetAccessEnabled, defaultInternetAccess)),
+		MDNSForwardingEnabled: types.BoolValue(boolPointerOrDefault(gmd.MdnsForwardingEnabled, defaultMDNSForwarding)),
+		ZoneID:                types.StringNull(),
+	}
+	if gmd.ZoneId != nil {
+		gw.ZoneID = types.StringValue(gmd.ZoneId.String())
 	}
 	if ip.DhcpConfiguration != nil {
 		if server, err := ip.DhcpConfiguration.AsGatewayManagedIPv4DHCPServerConfiguration(); err == nil && server.Mode == dhcpModeServer {
 			d := &dhcpModel{
-				DNSServers: types.ListNull(types.StringType),
+				DNSServers:                   types.ListNull(types.StringType),
+				DomainName:                   types.StringNull(),
+				LeaseTimeSeconds:             types.Int64Value(defaultDHCPLeaseSecond),
+				PingConflictDetectionEnabled: types.BoolValue(defaultConflictCheck),
 			}
 			if server.IpAddressRange != nil {
 				d.RangeStart = types.StringValue(server.IpAddressRange.Start)
 				d.RangeStop = types.StringValue(server.IpAddressRange.Stop)
 			}
-			if server.DomainName != nil {
+			if server.DomainName != nil && *server.DomainName != "" {
 				d.DomainName = types.StringValue(*server.DomainName)
 			}
 			if server.LeaseTimeSeconds != nil {
 				d.LeaseTimeSeconds = types.Int64Value(int64(*server.LeaseTimeSeconds))
+			}
+			if server.PingConflictDetectionEnabled != nil {
+				d.PingConflictDetectionEnabled = types.BoolValue(*server.PingConflictDetectionEnabled)
 			}
 			if server.DnsServerIpAddressesOverride != nil {
 				list, ld := types.ListValueFrom(ctx, types.StringType, *server.DnsServerIpAddressesOverride)
@@ -449,4 +562,22 @@ func flattenNetwork(ctx context.Context, n *official.NetworkDetails) (networkMod
 	}
 	m.Gateway = gw
 	return m, diags
+}
+
+func boolValueOrDefault(value types.Bool, fallback bool) bool {
+	if value.IsNull() || value.IsUnknown() {
+		return fallback
+	}
+	return value.ValueBool()
+}
+
+func boolPointerOrDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func int32Pointer(value int32) *int32 {
+	return &value
 }
