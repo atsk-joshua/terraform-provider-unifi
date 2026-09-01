@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -155,30 +156,45 @@ func (r *networkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"isolation_enabled": schema.BoolAttribute{
 						Optional: true,
 						Computed: true,
+						PlanModifiers: []planmodifier.Bool{
+							boolplanmodifier.UseStateForUnknown(),
+						},
 						Description: "Whether this network is isolated from other networks. The Integration API requires " +
 							"a value on every gateway-network write; omitted configurations default to false.",
 					},
 					"cellular_backup_enabled": schema.BoolAttribute{
 						Optional: true,
 						Computed: true,
+						PlanModifiers: []planmodifier.Bool{
+							boolplanmodifier.UseStateForUnknown(),
+						},
 						Description: "Whether this network may use cellular backup when WAN connections are down. The " +
 							"Integration API requires a value on every gateway-network write; omitted configurations default to false.",
 					},
 					"internet_access_enabled": schema.BoolAttribute{
 						Optional: true,
 						Computed: true,
+						PlanModifiers: []planmodifier.Bool{
+							boolplanmodifier.UseStateForUnknown(),
+						},
 						Description: "Whether devices on this network may access the internet. The Integration API requires " +
 							"a value on every gateway-network write; omitted configurations default to true.",
 					},
 					"mdns_forwarding_enabled": schema.BoolAttribute{
 						Optional: true,
 						Computed: true,
+						PlanModifiers: []planmodifier.Bool{
+							boolplanmodifier.UseStateForUnknown(),
+						},
 						Description: "Whether this network participates in mDNS forwarding. Omitted configurations default " +
 							"to false; a value is always sent for compatibility with Network versions where it is required.",
 					},
 					"zone_id": schema.StringAttribute{
 						Optional: true,
 						Computed: true,
+						PlanModifiers: []planmodifier.String{
+							stringplanmodifier.UseStateForUnknown(),
+						},
 						Description: "Firewall zone UUID associated with this network. When omitted for a new gateway network, " +
 							"the provider resolves the controller's system-defined Internal zone.",
 					},
@@ -214,6 +230,9 @@ func (r *networkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 							"ping_conflict_detection_enabled": schema.BoolAttribute{
 								Optional: true,
 								Computed: true,
+								PlanModifiers: []planmodifier.Bool{
+									boolplanmodifier.UseStateForUnknown(),
+								},
 								Description: "Check whether an address is already in use before the DHCP server offers it. The " +
 									"Integration API requires a value; omitted configurations default to true.",
 							},
