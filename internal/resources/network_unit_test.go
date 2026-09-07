@@ -117,11 +117,6 @@ func TestNetworkSchema(t *testing.T) {
 			t.Errorf("gateway.%s flags = optional:%v computed:%v required:%v, want true/true/false",
 				name, attr.Optional, attr.Computed, attr.Required)
 		}
-		if len(attr.PlanModifiers) != 1 ||
-			!strings.Contains(fmt.Sprintf("%T", attr.PlanModifiers[0]), "useStateForUnknownModifier") {
-			t.Errorf("gateway.%s must preserve imported state when configuration omits it; modifiers=%v",
-				name, attr.PlanModifiers)
-		}
 	}
 	zone, ok := gateway.Attributes["zone_id"].(resourceschema.StringAttribute)
 	if !ok {
@@ -130,11 +125,6 @@ func TestNetworkSchema(t *testing.T) {
 	if !zone.Optional || !zone.Computed || zone.Required {
 		t.Errorf("gateway.zone_id flags = optional:%v computed:%v required:%v, want true/true/false",
 			zone.Optional, zone.Computed, zone.Required)
-	}
-	if len(zone.PlanModifiers) != 1 ||
-		!strings.Contains(fmt.Sprintf("%T", zone.PlanModifiers[0]), "useStateForUnknownModifier") {
-		t.Errorf("gateway.zone_id must preserve imported state when configuration omits it; modifiers=%v",
-			zone.PlanModifiers)
 	}
 	dhcp, ok := gateway.Attributes["dhcp"].(resourceschema.SingleNestedAttribute)
 	if !ok {
@@ -148,11 +138,6 @@ func TestNetworkSchema(t *testing.T) {
 	if !conflict.Optional || !conflict.Computed || conflict.Required {
 		t.Errorf("gateway.dhcp.ping_conflict_detection_enabled flags = optional:%v computed:%v required:%v, want true/true/false",
 			conflict.Optional, conflict.Computed, conflict.Required)
-	}
-	if len(conflict.PlanModifiers) != 1 ||
-		!strings.Contains(fmt.Sprintf("%T", conflict.PlanModifiers[0]), "useStateForUnknownModifier") {
-		t.Errorf("gateway.dhcp.ping_conflict_detection_enabled must preserve imported state when configuration omits it; modifiers=%v",
-			conflict.PlanModifiers)
 	}
 }
 

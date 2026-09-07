@@ -13,7 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -156,47 +156,41 @@ func (r *networkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"isolation_enabled": schema.BoolAttribute{
 						Optional: true,
 						Computed: true,
-						PlanModifiers: []planmodifier.Bool{
-							boolplanmodifier.UseStateForUnknown(),
-						},
+						Default:  booldefault.StaticBool(defaultIsolation),
 						Description: "Whether this network is isolated from other networks. The Integration API requires " +
 							"a value on every gateway-network write; omitted configurations default to false.",
 					},
 					"cellular_backup_enabled": schema.BoolAttribute{
 						Optional: true,
 						Computed: true,
-						PlanModifiers: []planmodifier.Bool{
-							boolplanmodifier.UseStateForUnknown(),
-						},
+						Default:  booldefault.StaticBool(defaultCellularBackup),
 						Description: "Whether this network may use cellular backup when WAN connections are down. The " +
 							"Integration API requires a value on every gateway-network write; omitted configurations default to false.",
 					},
 					"internet_access_enabled": schema.BoolAttribute{
 						Optional: true,
 						Computed: true,
-						PlanModifiers: []planmodifier.Bool{
-							boolplanmodifier.UseStateForUnknown(),
-						},
+						Default:  booldefault.StaticBool(defaultInternetAccess),
 						Description: "Whether devices on this network may access the internet. The Integration API requires " +
 							"a value on every gateway-network write; omitted configurations default to true.",
 					},
 					"mdns_forwarding_enabled": schema.BoolAttribute{
 						Optional: true,
 						Computed: true,
-						PlanModifiers: []planmodifier.Bool{
-							boolplanmodifier.UseStateForUnknown(),
-						},
+						Default:  booldefault.StaticBool(defaultMDNSForwarding),
 						Description: "Whether this network participates in mDNS forwarding. Omitted configurations default " +
-							"to false; a value is always sent for compatibility with Network versions where it is required.",
+							"to false; a value is always sent for compatibility with Network versions where it is required. " +
+							"On Network >= 10.3.58 this explicitly disables forwarding rather than inheriting the site mDNS setting.",
 					},
 					"zone_id": schema.StringAttribute{
 						Optional: true,
 						Computed: true,
 						PlanModifiers: []planmodifier.String{
-							stringplanmodifier.UseStateForUnknown(),
+							stringplanmodifier.UseNonNullStateForUnknown(),
 						},
-						Description: "Firewall zone UUID associated with this network. When omitted for a new gateway network, " +
-							"the provider resolves the controller's system-defined Internal zone.",
+						Description: "Firewall zone UUID associated with this network. When omitted, preserves a known zone " +
+							"or reads the existing gateway network's zone before updating. New gateway networks resolve the " +
+							"controller's system-defined Internal zone. Set explicitly if automatic discovery is unavailable.",
 					},
 					"dhcp": schema.SingleNestedAttribute{
 						Optional:    true,
@@ -218,11 +212,13 @@ func (r *networkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 							},
 							"domain_name": schema.StringAttribute{
 								Optional:    true,
-								Description: "Domain name handed to clients.",
+								Description: "Non-empty domain name handed to clients. Omit to clear the domain; an empty controller value reads as null.",
+								Validators:  []validator.String{stringvalidator.LengthAtLeast(1)},
 							},
 							"lease_time_seconds": schema.Int64Attribute{
 								Optional: true,
 								Computed: true,
+								Default:  int64default.StaticInt64(defaultDHCPLeaseSecond),
 								Description: "DHCP lease time in seconds (0-31536000). The Integration API requires a value " +
 									"for DHCP servers; omitted configurations default to 86400 (24 hours).",
 								Validators: []validator.Int64{int64validator.Between(0, 31536000)},
@@ -230,9 +226,7 @@ func (r *networkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 							"ping_conflict_detection_enabled": schema.BoolAttribute{
 								Optional: true,
 								Computed: true,
-								PlanModifiers: []planmodifier.Bool{
-									boolplanmodifier.UseStateForUnknown(),
-								},
+								Default:  booldefault.StaticBool(defaultConflictCheck),
 								Description: "Check whether an address is already in use before the DHCP server offers it. The " +
 									"Integration API requires a value; omitted configurations default to true.",
 							},
@@ -355,6 +349,31 @@ func (r *networkResource) Update(ctx context.Context, req resource.UpdateRequest
 		resp.Diagnostics.AddError("Invalid network id", err.Error())
 		return
 	}
+	var prior networkModel
+	if plan.Management.ValueString() == mgmtGateway && plan.Gateway != nil &&
+		(plan.Gateway.ZoneID.IsNull() || plan.Gateway.ZoneID.IsUnknown()) {
+		resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+	if plan.Management.ValueString() == mgmtGateway && plan.Gateway != nil &&
+		(plan.Gateway.ZoneID.IsNull() || plan.Gateway.ZoneID.IsUnknown()) &&
+		prior.Management.ValueString() == mgmtGateway {
+		current, err := r.data.Client.Official().Networks().Get(ctx, r.data.SiteID, id)
+		if err != nil {
+			resp.Diagnostics.AddError("Failed to read existing gateway network zone", err.Error())
+			return
+		}
+		gateway, err := current.AsGatewayManagedNetworkDetails()
+		if err != nil || gateway.ZoneId == nil || *gateway.ZoneId == uuid.Nil {
+			resp.Diagnostics.AddAttributeError(path.Root("gateway").AtName("zone_id"),
+				"Unable to preserve existing gateway network zone",
+				"The controller did not return a usable zone ID. Set gateway.zone_id explicitly before updating this network.")
+			return
+		}
+		plan.Gateway.ZoneID = types.StringValue(gateway.ZoneId.String())
+	}
 	r.resolveGatewayZoneID(ctx, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
@@ -404,24 +423,37 @@ func (r *networkResource) ImportState(ctx context.Context, req resource.ImportSt
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
-// resolveGatewayZoneID supplies the system-defined Internal zone on create
-// when configuration does not name a zone. Network 10.6 requires zoneId on a
-// gateway-network write even though its OpenAPI schema does not mark it
-// required. Existing/imported state and explicit configuration always win.
+// resolveGatewayZoneID supplies a zone for create or conversion to GATEWAY.
+// Observed on Network 10.6.101: HTTP 400, code
+// "api.network.validation.missing-zone-id", message "zoneId must not be null", although
+// the OpenAPI schema does not mark it required. Update first recovers a missing
+// existing gateway zone with GET so discovery cannot move it to another zone.
+// "Internal" is an observed system-zone name, not a schema-enumerated identity:
+// require SYSTEM_DEFINED origin and a unique match, otherwise fail with an
+// explicit zone_id escape hatch rather than guess.
 func (r *networkResource) resolveGatewayZoneID(ctx context.Context, m *networkModel, diags *diag.Diagnostics) {
 	if m.Management.ValueString() != mgmtGateway || m.Gateway == nil ||
 		(!m.Gateway.ZoneID.IsNull() && !m.Gateway.ZoneID.IsUnknown()) {
 		return
 	}
+	var found *uuid.UUID
 	for zone, err := range r.data.Client.Official().Firewall().ListZonesAll(ctx, r.data.SiteID, "") {
 		if err != nil {
 			diags.AddError("Failed to resolve gateway network zone", err.Error())
 			return
 		}
 		if zone.Name == "Internal" && zone.Metadata.Origin == "SYSTEM_DEFINED" {
-			m.Gateway.ZoneID = types.StringValue(zone.Id.String())
-			return
+			if found != nil || zone.Id == uuid.Nil {
+				diags.AddError("Ambiguous gateway network zone", "Set gateway.zone_id explicitly; discovery did not return a unique usable system-defined Internal zone.")
+				return
+			}
+			id := zone.Id
+			found = &id
 		}
+	}
+	if found != nil {
+		m.Gateway.ZoneID = types.StringValue(found.String())
+		return
 	}
 	diags.AddAttributeError(path.Root("gateway").AtName("zone_id"), "Unable to resolve gateway network zone",
 		"The controller requires zone_id for gateway networks, but its system-defined Internal zone was not found. Set gateway.zone_id explicitly.")
